@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <math.h>
 
+#include "BitmapFontClass.h"
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
@@ -73,6 +74,15 @@ struct Vector
         Vector tmp = *this;
         tmp -= other;
         return tmp;
+    }
+
+    Vector operator - () const
+    {
+        Vector res;
+        res.x = -x;
+        res.y = -y;
+        res.z = -z;
+        return res;
     }
 
     float length() const
@@ -327,6 +337,8 @@ struct Mesh
             {
             case 0:
                 if (strcmp(token, "facet") == 0) ++state;
+                if (strcmp(token, "endsolid") == 0)
+                    return true;
                 break;
             case 1:
                 if (strcmp(token, "normal") == 0) ++state;
@@ -406,7 +418,7 @@ struct Mesh
 
             if (!first && oldstate == state)
             {
-                debug_print("unrecognize file %s", token);
+                debug_print("unrecognize token %s\n", token);
                 return false; // unrecognized token or out of order token
             }
             first = false;
@@ -610,6 +622,7 @@ struct Scene
     std::vector<std::unique_ptr<Mesh>> objects;
 
     std::string message;
+    CBitmapFont font;
 
     void draw();
     void init_opengl();
@@ -619,7 +632,8 @@ struct Scene
     bool pick(double mouse_x, double mouse_y, Vector &v);
     void scroll_callback(double x, double y);
     void set_projection();
-    bool fire(const Ray &ray, Vector &v);
+    bool fire_point(const Ray &ray, Vector &v);
+    bool fire_line(const Ray &ray, Vector &v);
     void autoscale();
 };
 
@@ -690,6 +704,14 @@ void Scene::draw()
     for (const auto &m : objects)
         m->render(wireframe);
 
+    if (!message.empty())
+    {
+        GLfloat ambientLight1[] = { 0.2f, 0.2f, 0.2f, 1.0f };
+        GLfloat ambientLight2[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        glLightfv(GL_LIGHT0, GL_AMBIENT, ambientLight2);
+        font.ezPrint(message.c_str(), 25, 50);
+        glLightfv(GL_LIGHT0, GL_AMBIENT, ambientLight1);
+    }
     glfwSwapBuffers(window);
 }
 
@@ -843,8 +865,9 @@ void Scene::mouse_button_callback(int button, int action, int mods)
                 char buf[256];
                 snprintf(buf, sizeof(buf), "Pick: (%7.3f,%7.3f,%7.3f)", c.x, c.y, c.z);
                 message = buf;
+                debug_print("%s\n", message.c_str());
                 objects.back()->clear();
-                objects.back()->make_sphere(0.5f, c);
+                objects.back()->make_sphere(0.02f / scale, c);
                 objects.back()->color = Color{ 0.8f, 0.8f, 0.8f };
             }
             else
@@ -893,24 +916,28 @@ bool Scene::pick(double mouse_x, double mouse_y, Vector &v)
     mat4x4_invert(inverse, projection);
     vec4 normMouse = { x, y, 1.0f, 1.0f };
     vec4 dir = { 0.0f, 0.0f, 1.0f, 0.0f };
-    vec4 eye;
-    mat4x4_mul_vec4(eye, inverse, normMouse);
-    debug_print("eye %g %g %g\n", eye[0], eye[1], eye[2]);
+    vec4 pos;
+    vec4 eye = { 0.0f, 0.0f, 0.0f, 1.0f };
+    mat4x4_mul_vec4(pos, inverse, normMouse);
+    mat4x4_mul_vec4(eye, inverse, eye);
+    debug_print("pos %g %g %g\n", pos[0], pos[1], pos[2]);
     mat4x4_mul_vec4(dir, inverse, dir);
     debug_print("dir %g %g %g\n", dir[0], dir[1], dir[2]);
 
     mat4x4_invert(inverse, modelview);
     vec4 pt;
-    mat4x4_mul_vec4(pt, inverse, eye);
+    mat4x4_mul_vec4(pt, inverse, pos);
+    mat4x4_mul_vec4(eye, inverse, eye);
     debug_print("pt %g %g %g\n", pt[0], pt[1], pt[2]);
     mat4x4_mul_vec4(dir, inverse, dir);
     debug_print("dir %g %g %g\n", dir[0], dir[1], dir[2]);
+    debug_print("eye %g %g %g\n", eye[0], eye[1], eye[2]);
 
     Ray r = { { pt[0], pt[1], pt[2] }, Vector{ dir[0], dir[1], dir[2] }.normalize() };
-    return fire(r, v);
+    return fire_line(r, v);
 }
 
-bool Scene::fire(const Ray &ray, Vector &v)
+bool Scene::fire_point(const Ray &ray, Vector &v)
 {
     Vector nearest;
     float dist = FLT_MAX;
@@ -936,6 +963,62 @@ bool Scene::fire(const Ray &ray, Vector &v)
             {
                 dist = d;
                 nearest = pt;
+            }
+        }
+    }
+
+    if (first)
+        debug_print("no nearest\n");
+    else
+    {
+        debug_print("nearest %g %g %g\n", nearest.x, nearest.y, nearest.z);
+        v = nearest;
+    }
+
+    return !first;
+}
+
+bool Scene::fire_line(const Ray &ray, Vector &v)
+{
+    Vector nearest;
+    float dist = FLT_MAX;
+    bool first = true;
+
+    for (const auto &m : objects)
+    {
+        if (!m->include_in_scene_box)
+            continue;
+
+        const Vector *vertices = &m->vertices[0];
+        const unsigned int  *triangles = &m->triangles[0];
+
+        for (size_t i = 0; i < m->triangles.size(); i += 3)
+        {
+            Vector side1 = vertices[triangles[i + 1]] - vertices[triangles[i]];
+            Vector side2 = vertices[triangles[i + 2]] - vertices[triangles[i]];
+            Vector triNorm = cross(side1, side2).normalize();
+            float d = dot(triNorm, ray.dir);
+            Vector w = ray.pt - vertices[triangles[i]];
+            float s = dot(triNorm, w) / d;
+            Vector intx = ray.pt - ray.dir * s;
+            float atot = cross(side1, side2).length() / 2.0f;
+            float ax1 = cross(intx - vertices[triangles[i]], side2).length() / 2.0f;
+            float ax2 = cross(intx - vertices[triangles[i + 1]], -side1).length() / 2.0f;
+            float ax3 = cross(intx - vertices[triangles[i + 2]], vertices[triangles[i + 1]] - vertices[triangles[i + 2]]).length() / 2.0f;
+            //debug_print("pt %g %g %g\n", intx.x, intx.y, intx.z);
+            if (fabs(atot - ax1 - ax2 - ax3) < atot * 1e-6)
+            {
+                if (first)
+                {
+                    first = false;
+                    dist = s;
+                    nearest = intx;
+                }
+                else if (s > dist)
+                {
+                    dist = s;
+                    nearest = intx;
+                }
             }
         }
     }
@@ -1061,6 +1144,8 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     glfwGetFramebufferSize(window, &width, &height);
     framebuffer_size_callback(window, width, height);
 
+    scene.font.Load("D:\\Projects\\3dview\\Times New Roman.bff");
+
     if (filename != nullptr)
     {
         if (strcmp(filename, "-spheres") == 0)
@@ -1083,6 +1168,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
             m->read_stl(filename);
             scene.objects.push_back(std::move(m));
         }
+        make_indicator();
     }
 
     scene.init_opengl();
