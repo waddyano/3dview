@@ -34,7 +34,7 @@ class CBitmapFont
   public:
    CBitmapFont();
    ~CBitmapFont();
-   bool Load(const char *fname);
+   bool Load(const TCHAR *fname);
    void SetScreen(int x, int y); 
    void SetCursor(int x, int y); 
    void SetColor(float Red, float Green, float Blue);
@@ -44,7 +44,6 @@ class CBitmapFont
    void SetBlend();              
    void Print(const char *Text);       
    void Print(const char *Text, int x, int y);
-   void Box(const char *Text, int x, int y);
    void ezPrint(const char *Text, int x, int y);
    int  GetWidth(const char *Text);
    

@@ -5,6 +5,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
 
 #include "BitmapFontClass.h"
@@ -13,6 +14,7 @@
 
 #include <linmath.h>
 #include <windows.h>
+#include <tchar.h>
 
 #include <algorithm>
 #include <memory>
@@ -34,6 +36,15 @@ static void debug_print(const char *s, ...)
     va_end(ap);
     OutputDebugStringA(buf);
 }
+
+#if 0
+static void debug_matrix(const char *s, mat4x4 mat)
+{
+    debug_print("%s\n", s);
+    for (int i = 0; i < 4; ++i)
+        debug_print(" %g %g %g %g\n", mat[i][0], mat[i][1], mat[i][2], mat[i][3]);
+}
+#endif
 
 struct Vector
 {
@@ -619,9 +630,17 @@ struct Scene
     bool dragged = false;
     bool wireframe = false;
 
-    std::vector<std::unique_ptr<Mesh>> objects;
+    std::vector<std::unique_ptr<Mesh>> m_objects;
+    Mesh *m_indicator1;
+    Mesh *m_indicator2;
+    Vector m_pick1;
+    Vector m_pick2;
+    int m_nextPick = 1;
+    int m_pickCount = 0;
 
-    std::string message;
+    std::string message1;
+    std::string message2;
+    std::string message3;
     CBitmapFont font;
 
     void draw();
@@ -635,30 +654,44 @@ struct Scene
     bool fire_point(const Ray &ray, Vector &v);
     bool fire_line(const Ray &ray, Vector &v);
     void autoscale();
+    void make_indicator(int no, const Vector &pos);
+    void clear();
 };
 
 static Scene scene;
+
+void Scene::clear()
+{
+    m_objects.clear();
+    m_indicator1 = nullptr;
+    m_indicator2 = nullptr;
+    message1.clear();
+    message2.clear();
+    message3.clear();
+    m_nextPick = 1;
+    m_pickCount = 0;
+}
 
 void Scene::autoscale()
 {
     scale = 1.0f;
     center = { 0.0f, 0.0f, 0.0f };
 
-    if (!objects.empty())
+    if (!m_objects.empty())
     {
         Box b;
         bool first = true;
-        for (size_t i = 0; i < objects.size(); ++i)
+        for (size_t i = 0; i < m_objects.size(); ++i)
         {
-            if (!objects[i]->include_in_scene_box)
+            if (!m_objects[i]->include_in_scene_box)
                 continue;
             if (first)
             {
-                b = objects[i]->model_box();
+                b = m_objects[i]->model_box();
                 first = false;
             }
             else
-                b += objects[i]->model_box();
+                b += m_objects[i]->model_box();
         }
         scale = 2.0f / b.size();
         center = b.center();
@@ -701,17 +734,20 @@ void Scene::draw()
 
     //glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, mat_ambient_color);
 
-    for (const auto &m : objects)
+    for (const auto &m : m_objects)
         m->render(wireframe);
 
-    if (!message.empty())
+    if (!message1.empty() || !message2.empty() || !message3.empty())
     {
         GLfloat ambientLight1[] = { 0.2f, 0.2f, 0.2f, 1.0f };
         GLfloat ambientLight2[] = { 1.0f, 1.0f, 1.0f, 1.0f };
         glLightfv(GL_LIGHT0, GL_AMBIENT, ambientLight2);
-        font.ezPrint(message.c_str(), 25, 50);
+        font.ezPrint(message1.c_str(), 5, 45);
+        font.ezPrint(message2.c_str(), 5, 25);
+        font.ezPrint(message3.c_str(), 5, 5);
         glLightfv(GL_LIGHT0, GL_AMBIENT, ambientLight1);
     }
+
     glfwSwapBuffers(window);
 }
 
@@ -838,6 +874,26 @@ static void mouse_button_callback(GLFWwindow* window, int button, int action, in
     scene.mouse_button_callback(button, action, mods);
 }
 
+void Scene::make_indicator(int no, const Vector &pos)
+{
+    if ((no == 1 && m_indicator1 == nullptr) || (no == 2 && m_indicator2 == nullptr))
+    {
+        std::unique_ptr<Mesh> m = std::make_unique<Mesh>();
+        m_objects.push_back(std::move(m));
+        if (no == 1)
+            m_indicator1 = m_objects.back().get();
+        else
+            m_indicator2 = m_objects.back().get();
+    }
+
+    Mesh *mesh = no == 1 ? m_indicator1 : m_indicator2;
+
+    mesh->clear();
+    mesh->make_sphere(0.5f, pos);
+    mesh->color = Color{ 0.8f, 0.8f, 0.8f };
+    mesh->include_in_scene_box = false;
+}
+
 void Scene::mouse_button_callback(int button, int action, int mods)
 {
     if (button != GLFW_MOUSE_BUTTON_LEFT)
@@ -857,31 +913,47 @@ void Scene::mouse_button_callback(int button, int action, int mods)
         double x, y;
         glfwGetCursorPos(window, &x, &y);
         debug_print("down %g %g up %g %g\n", mouse_down_x, mouse_down_y, x, y);
-        if (!dragged && !objects.empty())
+        if (!dragged && !m_objects.empty())
         {
             Vector c;
             if (pick(x, y, c))
             {
+                ++m_pickCount;
+
                 char buf[256];
                 snprintf(buf, sizeof(buf), "Pick: (%7.3f,%7.3f,%7.3f)", c.x, c.y, c.z);
-                message = buf;
-                debug_print("%s\n", message.c_str());
-                objects.back()->clear();
-                objects.back()->make_sphere(0.02f / scale, c);
-                objects.back()->color = Color{ 0.8f, 0.8f, 0.8f };
+                make_indicator(m_nextPick, c);
+                if (m_nextPick == 1)
+                {
+                    m_pick1 = c;
+                    message2 = buf;
+                }
+                else
+                {
+                    m_pick2 = c;
+                    message3 = buf;
+                }
+
+                ++m_nextPick;
+                if (m_nextPick > 2)
+                    m_nextPick = 1;
+
+                if (m_pickCount >= 2)
+                {
+                    snprintf(buf, sizeof(buf), "Distance: (%7.3f)", (m_pick1 - m_pick2).length());
+                    message1 = buf;
+
+                }
             }
             else
             {
-                message.clear();
+                message2.clear();
+                message3.clear();
             }
         }
     }
 }
 
-
-//========================================================================
-// Callback function for cursor motion events
-//========================================================================
 static void cursor_position_callback(GLFWwindow* window, double mouse_x, double mouse_y)
 {
     scene.cursor_position_callback(mouse_x, mouse_y);
@@ -911,29 +983,48 @@ bool Scene::pick(double mouse_x, double mouse_y, Vector &v)
     glfwGetWindowSize(window, &width, &height);
     float x = (2.0f * (float)mouse_x) / width - 1.0f;
     float y = 1.0f - (2.0f * (float)mouse_y) / height;
-    debug_print("cursor %g %g => %g %g\n", mouse_x, mouse_y, x, y);
-    mat4x4 inverse;
-    mat4x4_invert(inverse, projection);
-    vec4 normMouse = { x, y, 1.0f, 1.0f };
-    vec4 dir = { 0.0f, 0.0f, 1.0f, 0.0f };
-    vec4 pos;
-    vec4 eye = { 0.0f, 0.0f, 0.0f, 1.0f };
-    mat4x4_mul_vec4(pos, inverse, normMouse);
-    mat4x4_mul_vec4(eye, inverse, eye);
-    debug_print("pos %g %g %g\n", pos[0], pos[1], pos[2]);
-    mat4x4_mul_vec4(dir, inverse, dir);
-    debug_print("dir %g %g %g\n", dir[0], dir[1], dir[2]);
 
-    mat4x4_invert(inverse, modelview);
-    vec4 pt;
-    mat4x4_mul_vec4(pt, inverse, pos);
-    mat4x4_mul_vec4(eye, inverse, eye);
-    debug_print("pt %g %g %g\n", pt[0], pt[1], pt[2]);
-    mat4x4_mul_vec4(dir, inverse, dir);
-    debug_print("dir %g %g %g\n", dir[0], dir[1], dir[2]);
-    debug_print("eye %g %g %g\n", eye[0], eye[1], eye[2]);
+    mat4x4 proj_inverse;
+    mat4x4_invert(proj_inverse, projection);
+    vec4 mouseNear = { x, y, -1.0f, 1.0f };
+    vec4 nearPt;
+    mat4x4_mul_vec4(nearPt, proj_inverse, mouseNear);
 
-    Ray r = { { pt[0], pt[1], pt[2] }, Vector{ dir[0], dir[1], dir[2] }.normalize() };
+    mat4x4 mv_inverse;
+    mat4x4_invert(mv_inverse, modelview);
+    mat4x4_mul_vec4(nearPt, mv_inverse, nearPt);
+    nearPt[0] /= nearPt[3];
+    nearPt[1] /= nearPt[3];
+    nearPt[2] /= nearPt[3];
+
+    Ray r;
+    if (perspective)
+    {
+        vec4 farPt = { x, y, 1.0f, 1.0f };
+        mat4x4_mul_vec4(farPt, proj_inverse, farPt);
+        mat4x4_mul_vec4(farPt, mv_inverse, farPt);
+        farPt[0] /= farPt[3];
+        farPt[1] /= farPt[3];
+        farPt[2] /= farPt[3];
+
+        Vector a;
+        a.x = farPt[0];
+        a.y = farPt[1];
+        a.z = farPt[2];
+        Vector b;
+        b.x = nearPt[0];
+        b.y = nearPt[1];
+        b.z = nearPt[2];
+        r = { a, (a - b).normalize() };
+    }
+    else
+    {
+
+        vec4 dir = { 0.0f, 0.0f, 1.0f, 0.0f };
+        mat4x4_mul_vec4(dir, proj_inverse, dir);
+        mat4x4_mul_vec4(dir, mv_inverse, dir);
+        r = { { nearPt[0], nearPt[1], nearPt[2] }, Vector{ dir[0], dir[1], dir[2] }.normalize() };
+    }
     return fire_line(r, v);
 }
 
@@ -943,7 +1034,7 @@ bool Scene::fire_point(const Ray &ray, Vector &v)
     float dist = FLT_MAX;
     bool first = true;
 
-    for (const auto &m : objects)
+    for (const auto &m : m_objects)
     {
         if (!m->include_in_scene_box)
             continue;
@@ -984,7 +1075,7 @@ bool Scene::fire_line(const Ray &ray, Vector &v)
     float dist = FLT_MAX;
     bool first = true;
 
-    for (const auto &m : objects)
+    for (const auto &m : m_objects)
     {
         if (!m->include_in_scene_box)
             continue;
@@ -1083,27 +1174,17 @@ static void framebuffer_size_callback(GLFWwindow* window, int width, int height)
     scene.set_projection();
 }
 
-static void make_indicator()
-{
-    std::unique_ptr<Mesh> m = std::make_unique<Mesh>();
-    m->make_sphere(0.5f, Vector{ 15.0f, 15.0f, 15.0f });
-    m->color = Color{ 0.8f, 0.8f, 0.8f };
-    m->include_in_scene_box = false;
-    scene.objects.push_back(std::move(m));
-}
-
 static void drop_callback(GLFWwindow *window, int n_files, const char** files)
 {
-    scene.objects.clear();
+    scene.clear();
 
     for (int i = 0; i < n_files; ++i)
     {
         std::unique_ptr<Mesh> m = std::make_unique<Mesh>();
         m->read_stl(files[i]);
-        scene.objects.push_back(std::move(m));
+        scene.m_objects.push_back(std::move(m));
     }
 
-    make_indicator();
     scene.autoscale();
 }
 
@@ -1144,7 +1225,15 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     glfwGetFramebufferSize(window, &width, &height);
     framebuffer_size_callback(window, width, height);
 
-    scene.font.Load("D:\\Projects\\3dview\\Times New Roman.bff");
+    HMODULE main_mod = GetModuleHandle(nullptr);
+    TCHAR main_mod_file[256];
+    GetModuleFileName(main_mod, main_mod_file, sizeof(main_mod_file) / sizeof(TCHAR));
+    TCHAR *p = _tcsrchr(main_mod_file, '\\');
+    if (p != nullptr)
+    {
+        _tcscpy(p + 1, _T("Times New Roman.bff"));
+        scene.font.Load(main_mod_file);
+    }
 
     if (filename != nullptr)
     {
@@ -1159,16 +1248,15 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
                     m->color = Color{ 0.9f, 0.2f, 0.2f };
                 if (i == 7)
                     m->color = Color{ 0.2f, 0.9f, 0.2f };
-                scene.objects.push_back(std::move(m));
+                scene.m_objects.push_back(std::move(m));
             }
         }
         else
         {
             std::unique_ptr<Mesh> m = std::make_unique<Mesh>();
             m->read_stl(filename);
-            scene.objects.push_back(std::move(m));
+            scene.m_objects.push_back(std::move(m));
         }
-        make_indicator();
     }
 
     scene.init_opengl();
